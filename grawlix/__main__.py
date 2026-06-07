@@ -133,6 +133,10 @@ async def download_series(source: Source, series: Series, args) -> None:
                 await download_with_progress(book, progress, template)
             except AccessDenied as error:
                 logging.info("Skipping - Access Denied")
+            except Exception as error:
+                logging.info(f"Skipping book {book_id} ({error})")
+                if logging.debug_mode:
+                    traceback.print_exc()
 
 
 
