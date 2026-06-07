@@ -4,6 +4,7 @@ from grawlix.exceptions import InvalidUrl
 from .source import Source
 
 from typing import Optional
+from datetime import datetime
 import uuid
 import rich
 import base64
@@ -47,7 +48,6 @@ class Nextory(Source):
             },
         )
         session_response = session_response.json()
-        rich.print(session_response)
         login_token = session_response["login_token"]
         country = session_response["country"]
         self._client.headers.update(
@@ -62,7 +62,6 @@ class Nextory(Source):
             "https://api.nextory.com/user/v1/me/profiles",
         )
         profiles_response = profiles_response.json()
-        rich.print(profiles_response)
         profile = profiles_response["profiles"][0]
         login_key = profile["login_key"]
         authorize_response = await self._client.post(
@@ -72,9 +71,7 @@ class Nextory(Source):
             }
         )
         authorize_response = authorize_response.json()
-        rich.print(authorize_response)
         profile_token = authorize_response["profile_token"]
-        self._client.headers.update({"X-Profile-Token": profile_token})
         self._client.headers.update({"X-Profile-Token": profile_token})
 
 
@@ -100,11 +97,53 @@ class Nextory(Source):
 
 
     async def download(self, url: str) -> Result:
+        if self._is_wantlist_url(url):
+            return await self._download_wantlist()
         url_id = self._extract_id_from_url(url)
         if "serier" in url:
             return await self._download_series(url_id)
         else:
             return await self._download_book(url_id)
+
+
+    @staticmethod
+    def _is_wantlist_url(url: str) -> bool:
+        """Match the want-to-read list url rather than a single book."""
+        return "want-to-read" in url.lower()
+
+
+    async def _download_want_to_read_id(self) -> str:
+        """Find the id of the profile's want-to-read product list."""
+        response = await self._client.get(
+            "https://api.nextory.com/library/v1/me/product_lists",
+            params = { "page": 0, "per": 50 },
+        )
+        for product_list in response.json()["product_lists"]:
+            if product_list["type"] == "want_to_read":
+                return product_list["id"]
+        raise InvalidUrl
+
+
+    async def _download_want_to_read_list(self) -> list:
+        """Download every product on the want-to-read list."""
+        list_id = await self._download_want_to_read_id()
+        response = await self._client.get(
+            "https://api.nextory.com/library/v1/me/product_lists/want_to_read/products",
+            params = { "page": "0", "per": "1000", "id": list_id },
+        )
+        return response.json()["products"]
+
+
+    async def _download_wantlist(self) -> Series:
+        """Build a series of every want-to-read book available as an epub."""
+        book_ids = []
+        for product in await self._download_want_to_read_list():
+            if any(f["type"] == "epub" for f in product.get("formats", [])):
+                book_ids.append(product["id"])
+        return Series(
+            title = "Nextory want to read",
+            book_ids = book_ids,
+        )
 
 
     async def download_book_from_id(self, book_id: str) -> Book:
@@ -138,11 +177,52 @@ class Nextory(Source):
 
 
     @staticmethod
-    def _extract_series_name(product_info: dict) -> Optional[str]:
+    def _extract_series_metadata(product_info: dict) -> tuple:
+        """Series name and position. Nextory keeps the position in the
+        top-level ``volume`` field (the series object's own vol is always 0)."""
         series = product_info.get("series")
         if not series:
-            return None
-        return series["name"]
+            return None, None
+        name = series.get("name")
+        index = None
+        volume = product_info.get("volume")
+        if volume is not None:
+            try:
+                volume = int(volume)
+                if volume > 0:
+                    index = volume
+            except (TypeError, ValueError):
+                pass
+        return name, index
+
+
+    def _build_metadata(self, product_data: dict) -> Metadata:
+        series_name, index = self._extract_series_metadata(product_data)
+        metadata = Metadata(
+            title = product_data["title"],
+            authors = [author["name"] for author in product_data["authors"]],
+            series = series_name,
+            index = index,
+            description = product_data.get("description_full"),
+            language = product_data.get("language"),
+        )
+        # Publisher, ISBN and publication date live on the epub format.
+        epub_format = next(
+            (f for f in product_data["formats"] if f["type"] == "epub"), None)
+        if epub_format:
+            publisher = epub_format.get("publisher")
+            if isinstance(publisher, dict):
+                metadata.publisher = publisher.get("name")
+            isbn = epub_format.get("isbn")
+            if isbn:
+                metadata.identifier = str(isbn)
+            pub_date = epub_format.get("publication_date")
+            if pub_date:
+                try:
+                    metadata.release_date = datetime.strptime(pub_date, "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    pass
+        return metadata
 
 
     async def _get_book_id_from_url_id(self, url_id: str) -> str:
@@ -170,11 +250,7 @@ class Nextory(Source):
         pages = await self._get_pages(epub_id)
         return Book(
             data = pages,
-            metadata = Metadata(
-                title = product_data["title"],
-                authors = [author["name"] for author in product_data["authors"]],
-                series = self._extract_series_name(product_data),
-            )
+            metadata = self._build_metadata(product_data),
         )
 
 
