@@ -97,6 +97,23 @@ class Epub(OutputFormat):
                 yield filename
 
         output = epub.EpubBook()
+        output.set_title(metadata.title)
+        if metadata.language:
+            output.set_language(metadata.language)
+        for author in metadata.authors:
+            output.add_author(author)
+        if metadata.identifier:
+            output.set_identifier(metadata.identifier)
+        if metadata.description:
+            output.add_metadata("DC", "description", metadata.description)
+        if metadata.publisher:
+            output.add_metadata("DC", "publisher", metadata.publisher)
+        if metadata.release_date:
+            output.add_metadata("DC", "date", metadata.release_date.isoformat())
+        if metadata.series:
+            output.add_metadata(None, "meta", "", {"name": "calibre:series", "content": metadata.series})
+            if metadata.index is not None:
+                output.add_metadata(None, "meta", "", {"name": "calibre:series_index", "content": str(metadata.index)})
         for file in files:
             await self._download_and_write_file(file, temporary_file_location)
             with ZipFile(temporary_file_location, "r") as zipfile:
@@ -135,4 +152,3 @@ class Epub(OutputFormat):
         output.add_item(epub.EpubNcx())
         output.add_item(epub.EpubNav())
         epub.write_epub(location, output)
-        exit()
