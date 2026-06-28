@@ -113,10 +113,18 @@ async def main() -> None:
                 await download_series(source, result, args)
             logging.info("")
         except GrawlixError as error:
+            # Don't abort a multi-url batch (e.g. `-f links.txt`) on one failure
             error.print_error()
             if logging.debug_mode:
                 traceback.print_exc()
-            exit(1)
+            if len(urls) == 1:
+                exit(1)
+        except Exception as error:
+            logging.info(f"Skipping {url} - {type(error).__name__}: {error}")
+            if logging.debug_mode:
+                traceback.print_exc()
+            if len(urls) == 1:
+                exit(1)
 
 
 async def download_series(source: Source, series: Series, args) -> None:
