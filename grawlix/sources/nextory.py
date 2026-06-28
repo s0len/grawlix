@@ -47,7 +47,6 @@ class Nextory(Source):
             },
         )
         session_response = session_response.json()
-        rich.print(session_response)
         login_token = session_response["login_token"]
         country = session_response["country"]
         self._client.headers.update(
@@ -62,7 +61,6 @@ class Nextory(Source):
             "https://api.nextory.com/user/v1/me/profiles",
         )
         profiles_response = profiles_response.json()
-        rich.print(profiles_response)
         profile = profiles_response["profiles"][0]
         login_key = profile["login_key"]
         authorize_response = await self._client.post(
@@ -72,9 +70,7 @@ class Nextory(Source):
             }
         )
         authorize_response = authorize_response.json()
-        rich.print(authorize_response)
         profile_token = authorize_response["profile_token"]
-        self._client.headers.update({"X-Profile-Token": profile_token})
         self._client.headers.update({"X-Profile-Token": profile_token})
 
 
@@ -100,6 +96,8 @@ class Nextory(Source):
 
 
     async def download(self, url: str) -> Result:
+        if "want-to-read" in url.lower() or "saved-for-later" in url.lower():
+            return await self._download_want_to_read()
         url_id = self._extract_id_from_url(url)
         if "serier" in url:
             return await self._download_series(url_id)
@@ -109,6 +107,54 @@ class Nextory(Source):
 
     async def download_book_from_id(self, book_id: str) -> Book:
         return await self._download_book(book_id)
+
+
+    async def _download_want_to_read(self) -> Series:
+        """
+        Download every ebook saved in the user's want-to-read ("Saved for
+        later") list. Entries without an epub format (e.g. audiobook-only) are
+        skipped, since grawlix downloads ebooks.
+
+        :returns: Series of ebook ids
+        """
+        lists_response = await self._client.get(
+            "https://api.nextory.com/library/v1/me/product_lists",
+            params = { "page": 0, "per": 50 },
+        )
+        want_to_read_id = None
+        for product_list in lists_response.json()["product_lists"]:
+            if product_list["type"] == "want_to_read":
+                want_to_read_id = product_list["id"]
+                break
+        if want_to_read_id is None:
+            raise InvalidUrl
+        book_ids = []
+        seen: set = set()
+        page = 0
+        while True:
+            response = await self._client.get(
+                "https://api.nextory.com/library/v1/me/product_lists/want_to_read/products",
+                params = { "page": page, "per": 1000, "id": want_to_read_id },
+            )
+            products = response.json().get("products", [])
+            new = 0
+            for product in products:
+                pid = product["id"]
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                new += 1
+                if any(f.get("type") == "epub" for f in product.get("formats", [])):
+                    book_ids.append(pid)
+            # Stop on an empty page, a short (final) page, or a page that adds
+            # nothing new (guards against an API that ignores `page`).
+            if not products or new == 0 or len(products) < 1000:
+                break
+            page += 1
+        return Series(
+            title = "Nextory - Saved for later",
+            book_ids = book_ids,
+        )
 
 
     async def _download_series(self, series_id: str) -> Series:
