@@ -129,6 +129,7 @@ class Nextory(Source):
         if want_to_read_id is None:
             raise InvalidUrl
         book_ids = []
+        seen: set = set()
         page = 0
         while True:
             response = await self._client.get(
@@ -136,12 +137,18 @@ class Nextory(Source):
                 params = { "page": page, "per": 1000, "id": want_to_read_id },
             )
             products = response.json().get("products", [])
-            if not products:
-                break
+            new = 0
             for product in products:
+                pid = product["id"]
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                new += 1
                 if any(f.get("type") == "epub" for f in product.get("formats", [])):
-                    book_ids.append(product["id"])
-            if len(products) < 1000:
+                    book_ids.append(pid)
+            # Stop on an empty page, a short (final) page, or a page that adds
+            # nothing new (guards against an API that ignores `page`).
+            if not products or new == 0 or len(products) < 1000:
                 break
             page += 1
         return Series(

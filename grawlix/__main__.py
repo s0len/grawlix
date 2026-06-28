@@ -112,15 +112,12 @@ async def main() -> None:
             elif isinstance(result, Series):
                 await download_series(source, result, args)
             logging.info("")
-        except GrawlixError as error:
-            # Don't abort a multi-url batch (e.g. `-f links.txt`) on one failure
-            error.print_error()
-            if logging.debug_mode:
-                traceback.print_exc()
-            if len(urls) == 1:
-                exit(1)
         except Exception as error:
-            logging.info(f"Skipping {url} - {type(error).__name__}: {error}")
+            # Don't abort a multi-url batch (e.g. `-f links.txt`) on one failure
+            if isinstance(error, GrawlixError):
+                error.print_error()
+            else:
+                logging.info(f"Skipping {url} - {type(error).__name__}: {error}")
             if logging.debug_mode:
                 traceback.print_exc()
             if len(urls) == 1:
@@ -141,13 +138,15 @@ async def download_series(source: Source, series: Series, args) -> None:
                 book: Book = await source.download_book_from_id(book_id)
                 await download_with_progress(book, progress, template)
             except AccessDenied:
-                logging.info("Skipping - Access Denied")
+                failed.append(book_id)
+                logging.info(f"Skipping {book_id} - Access Denied")
             except Exception as error:
                 # Don't let one bad book abort the whole list; record and continue
-                failed.append((book_id, error))
+                failed.append(book_id)
                 logging.info(f"Skipping {book_id} - {type(error).__name__}: {error}")
     if failed:
-        logging.info(f"{len(failed)} book(s) could not be downloaded and were skipped")
+        logging.info(f"{len(failed)} book(s) could not be downloaded and were skipped: "
+                     + ", ".join(str(b) for b in failed))
 
 
 
