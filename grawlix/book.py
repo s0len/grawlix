@@ -25,6 +25,7 @@ class Metadata:
             "identifier": self.identifier or "UNKNOWN",
             "language": self.language or "UNKNOWN",
             "authors": "; ".join(self.authors),
+            "author": self.authors[0] if self.authors else "UNKNOWN",
             "description": self.description or "UNKNOWN",
             "release_date": self.release_date.isoformat() if self.release_date else "UNKNOWN",
         }
