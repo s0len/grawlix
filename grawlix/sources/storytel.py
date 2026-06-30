@@ -14,12 +14,20 @@ class Storytel(Source):
     name: str = "Storytel"
     match = [
         r"https?://(?:www.)?(?:storytel|mofibo).com/(?P<language>\w+)(?:/(?P<language2>\w+))?/(?P<list_type>(?:books|series|authors|narrators|publishers|categories))/.+",
+        # The user's own bookshelf ("want to read"); dispatched in download().
+        # Allows one or two locale segments (e.g. /se/ or /se/sv/).
+        r"https?://(?:www\.)?(?:storytel|mofibo)\.com/\w+(?:/\w+)?/(?:want-to-read|bookshelf)/?$",
     ]
     _authentication_methods = [ "login" ]
     __download_counter = 0
 
     async def download(self, url: str) -> Result:
         await self.reauthenticate()
+
+        # Anchor to the final path segment so a catalog URL whose slug merely
+        # contains "bookshelf"/"want-to-read" is not misrouted here.
+        if re.search(r"/(?:want-to-read|bookshelf)/?$", url.split("?")[0].split("#")[0]):
+            return await self._download_bookshelf()
 
         if m := re.match(self.match[0], url):
             language, language2, list_type = m.groups()
@@ -48,10 +56,16 @@ class Storytel(Source):
             f"https://api.storytel.net/book-details/consumables/{book_id}?kidsMode=false&configVariant=default"
         )
         details = response.json()
+        series_info = details.get("seriesInfo") or {}
 
         return Book(
             metadata = Metadata(
-                title = details["title"]
+                title = details["title"],
+                authors = [a["name"] for a in details.get("authors", []) if a.get("name")],
+                series = series_info.get("name"),
+                index = series_info.get("orderInSeries"),
+                language = details.get("language"),
+                description = details.get("description"),
             ),
             data = SingleFile(
                 OnlineFile(
@@ -60,6 +74,40 @@ class Storytel(Source):
                     headers = self._client.headers
                 )
             )
+        )
+
+
+    async def _download_bookshelf(self) -> Series:
+        """
+        Download every ebook in the user's bookshelf that is marked as "want to
+        read" (Storytel state ``WILL_CONSUME``). Entries without an ebook format
+        (e.g. audiobook-only) are skipped, since grawlix downloads ebooks.
+
+        :return: Series of ebook ids
+        """
+        # The bookshelf endpoint needs a JSON body sent with a form-urlencoded
+        # content type; it rejects application/json with HTTP 400.
+        response = await self._client.post(
+            "https://api.storytel.net/libraries/bookshelf",
+            content = json.dumps({"items": []}),
+            headers = {"content-type": "application/x-www-form-urlencoded"},
+        )
+        if response.status_code != 200:
+            # e.g. an expired session returns 4xx with a non-book body
+            raise SourceNotAuthenticated
+        book_ids: list[str] = []
+        for item in response.json().get("items", {}).values():
+            model = item.get("model", {})
+            book_id = model.get("id")
+            if not book_id or model.get("state") != "WILL_CONSUME":
+                continue
+            if any(f.get("type") == "ebook" for f in model.get("formats", [])):
+                book_ids.append(book_id)
+        if not book_ids:
+            logging.info("No ebooks marked as 'want to read' were found in the bookshelf")
+        return Series(
+            title = "Storytel - Vill läsa",
+            book_ids = book_ids,
         )
 
 
@@ -186,7 +234,7 @@ class Storytel(Source):
         self._client.headers.update({"authorization": f"Bearer {jwt}"})
 
 
-    async def login(self, username: str, password: str, **kwargs) -> None:
+    async def login(self, url: str, username: str, password: str, **kwargs) -> None:
         self.__username = username
         self.__password = self.encrypt_password(password)
         self._client.headers.update({"User-Agent": "Storytel/23.49 (Android 13; Pixel 6) Release/2288481"})
