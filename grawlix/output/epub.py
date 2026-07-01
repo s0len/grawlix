@@ -4,9 +4,11 @@ from .output_format import OutputFormat, Update
 
 import asyncio
 from bs4 import BeautifulSoup
+import html as _html
 import os
+import re
 from ebooklib import epub
-from zipfile import ZipFile
+from zipfile import ZipFile, ZipInfo, ZIP_STORED, ZIP_DEFLATED
 import rich
 
 class Epub(OutputFormat):
@@ -23,6 +25,92 @@ class Epub(OutputFormat):
             await self._download_epub_in_parts(book.data, book.metadata, location, update)
         else:
             raise UnsupportedOutputFormat
+        # Make the file self-describing regardless of source (Nextory rebuilds
+        # the epub via ebooklib and would otherwise embed no title/author/series;
+        # Storytel keeps the publisher epub which lacks series info).
+        self._embed_metadata(location, book.metadata)
+
+
+    @staticmethod
+    def _embed_metadata(location: str, metadata: Metadata) -> None:
+        """
+        Best-effort: add missing identity/series metadata to the epub's OPF so
+        the file is self-describing regardless of source. Only fields that are
+        ABSENT are added — existing OPF content is never removed or rewritten,
+        which keeps publisher metadata, EPUB3 ``refines``, comments and foreign
+        namespaces intact. Any failure is swallowed: embedding is an enhancement
+        and must never break an otherwise successful download.
+        """
+        try:
+            with ZipFile(location) as zf:
+                names = set(zf.namelist())
+                if "META-INF/container.xml" not in names:
+                    return
+                container = zf.read("META-INF/container.xml").decode("utf-8")
+                m = re.search(r"full-path\s*=\s*['\"]([^'\"]+)['\"]", container)
+                if not m or m.group(1) not in names:
+                    return
+                opf_name = m.group(1)
+                raw = zf.read(opf_name)
+
+            # Respect the OPF's declared encoding; bail if we cannot round-trip it.
+            encoding = "utf-8"
+            decl = re.match(rb"<\?xml[^>]*?encoding=['\"]([\w.-]+)['\"]", raw)
+            if decl:
+                encoding = decl.group(1).decode("ascii", "ignore") or "utf-8"
+            try:
+                opf = raw.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                return
+
+            close = re.search(r"</\s*metadata\s*>", opf)
+            if not close:
+                return
+
+            def esc(value: object) -> str:
+                return _html.escape(str(value), quote=True)
+
+            def missing(pattern: str) -> bool:
+                return re.search(pattern, opf) is None
+
+            inject: list[str] = []
+            if metadata.title and missing(r"<dc:title[\s/>]"):
+                inject.append(f"<dc:title>{esc(metadata.title)}</dc:title>")
+            if metadata.authors and missing(r"<dc:creator[\s/>]"):
+                inject += [f"<dc:creator>{esc(a)}</dc:creator>" for a in metadata.authors]
+            if metadata.language and missing(r"<dc:language[\s/>]"):
+                inject.append(f"<dc:language>{esc(metadata.language)}</dc:language>")
+            if metadata.publisher and missing(r"<dc:publisher[\s/>]"):
+                inject.append(f"<dc:publisher>{esc(metadata.publisher)}</dc:publisher>")
+            if metadata.release_date and missing(r"<dc:date[\s/>]"):
+                inject.append(f"<dc:date>{esc(metadata.release_date)}</dc:date>")
+            if metadata.series and missing(r"""(?:name=['"]calibre:series['"]|belongs-to-collection)"""):
+                inject.append(f'<meta name="calibre:series" content="{esc(metadata.series)}"/>')
+                if metadata.index is not None:
+                    inject.append(f'<meta name="calibre:series_index" content="{esc(metadata.index)}"/>')
+            if not inject:
+                return
+
+            opf = opf[:close.start()] + "".join(inject) + opf[close.start():]
+            new_opf = opf.encode(encoding)
+
+            tmp = f"{location}.tmp"
+            try:
+                with ZipFile(location) as zin, ZipFile(tmp, "w") as zout:
+                    for item in zin.infolist():  # preserves entry order (mimetype first)
+                        data = new_opf if item.filename == opf_name else zin.read(item)
+                        compress = ZIP_STORED if item.filename == "mimetype" else ZIP_DEFLATED
+                        info = ZipInfo(item.filename, date_time=item.date_time)
+                        info.compress_type = compress
+                        info.external_attr = item.external_attr
+                        zout.writestr(info, data)
+                os.replace(tmp, location)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+        except Exception:
+            # Never let metadata embedding break a successful download.
+            return
 
 
     async def _download_html_files(self, html: HtmlFiles, metadata: Metadata, location: str, update: Update) -> None:
@@ -135,4 +223,3 @@ class Epub(OutputFormat):
         output.add_item(epub.EpubNcx())
         output.add_item(epub.EpubNav())
         epub.write_epub(location, output)
-        exit()

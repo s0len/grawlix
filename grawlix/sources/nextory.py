@@ -4,6 +4,7 @@ from grawlix.exceptions import InvalidUrl
 from .source import Source
 
 from typing import Optional
+from datetime import date
 import uuid
 import rich
 import base64
@@ -168,14 +169,55 @@ class Nextory(Source):
         product_data = product_data.json()
         epub_id = self._find_epub_id(product_data)
         pages = await self._get_pages(epub_id)
+        epub_format = self._find_epub_format(product_data)
         return Book(
             data = pages,
             metadata = Metadata(
                 title = product_data["title"],
                 authors = [author["name"] for author in product_data["authors"]],
                 series = self._extract_series_name(product_data),
+                index = self._to_int(product_data.get("volume")),
+                language = product_data.get("language"),
+                publisher = self._extract_publisher(epub_format),
+                release_date = self._parse_date(epub_format.get("publication_date") if epub_format else None),
             )
         )
+
+
+    @staticmethod
+    def _find_epub_format(product_data: dict) -> Optional[dict]:
+        """Return the epub format entry for a product, if any"""
+        for format in product_data.get("formats", []):
+            if format.get("type") == "epub":
+                return format
+        return None
+
+
+    @staticmethod
+    def _parse_date(value: Optional[str]) -> Optional[date]:
+        """Parse a Nextory ``YYYY-MM-DD`` publication date, ignoring bad values"""
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(value[:10])
+        except (TypeError, ValueError):
+            return None
+
+
+    @staticmethod
+    def _to_int(value) -> Optional[int]:
+        """Coerce a series index to int, tolerating strings/floats/None"""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+
+    @staticmethod
+    def _extract_publisher(epub_format: Optional[dict]) -> Optional[str]:
+        """Publisher name from an epub format entry, guarding non-dict shapes"""
+        publisher = (epub_format or {}).get("publisher")
+        return publisher.get("name") if isinstance(publisher, dict) else None
 
 
     @staticmethod
